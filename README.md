@@ -1,7 +1,7 @@
 # GLSLCompat
 
 A proxy DLL that intercepts OpenGL calls to patch deprecated GLSL features for compatibility with modern drivers.  
-It allows legacy demos and applications to run cleanly, free from shader compilation warnings and errors.
+It allows legacy demos and applications to run properly, without shader compilation warnings and errors.
 
 This project was written entirely with AI to make the **"For Your Love"** demo by ASD work on newer NVIDIA GPU drivers.  
 Optimizations were made to ensure the wrapper does not introduce additional rendering performance overhead.
