@@ -19,7 +19,6 @@
 #include <unordered_map>
 
 #pragma warning(disable:4273)
-
 #pragma comment(linker, "/INCLUDE:wglGetProcAddress")
 #pragma comment(linker, "/INCLUDE:glShaderSource")
 #pragma comment(linker, "/INCLUDE:glShaderSourceARB")
@@ -78,7 +77,6 @@ static HMODULE g_hThisModule = NULL;
 
 // -------------------- Async logger -----------------------------------------
 #if PROXY_LOG_ENABLED
-
 namespace ProxyLog {
     static std::mutex queueMutex;
     static std::condition_variable queueCv;
@@ -143,16 +141,13 @@ namespace ProxyLog {
     }
     inline void Log(const std::string& s) { Enqueue(s); }
 }
-
 #else
-
 namespace ProxyLog {
     inline void Start() {}
     inline void Stop() {}
     inline void Log(const std::string&) {}
 }
-
-#endif // PROXY_LOG_ENABLED
+#endif
 
 static inline std::string ToStringInt(int v) {
     char buf[32]; _itoa_s(v, buf, 10); return std::string(buf);
@@ -329,7 +324,6 @@ static std::string TransformShaderSourceConservative(GLenum shaderType, const st
     }
     else if (effectiveStage == GL_VERTEX_SHADER) {
         WordReplace(s, "varying", "out");
-
         // FIX: use 'attribute' for GLSL < 130, 'in' for GLSL >= 130.
         // 'in' is not valid syntax for vertex attributes in #version 120 shaders.
         if (s.find("gl_Vertex") != std::string::npos) {
@@ -360,7 +354,7 @@ static std::string TransformShaderSourceConservative(GLenum shaderType, const st
     return s;
 }
 
-// -------------------- Real function pointers -------------------------------
+// -------------------- Lazy real function pointers (once per function) -----
 typedef void (APIENTRY* PFN_glShaderSource)(GLuint, GLsizei, const GLchar* const*, const GLint*);
 typedef void (APIENTRY* PFN_glShaderSourceARB)(GLhandleARB, GLsizei, const GLcharARB**, const GLint*);
 typedef void (APIENTRY* PFN_glCompileShader)(GLuint);
@@ -387,66 +381,96 @@ static PFN_glBindAttribLocation   real_glBindAttribLocation   = nullptr;
 static PFN_glViewport             real_glViewport             = nullptr;
 static PFN_glGetString            real_glGetString            = nullptr;
 
-// -------------------- Proc helpers -----------------------------------------
-static PROC RealWglGetProcAddress(LPCSTR name) {
-    if (!hRealOpenGL) return NULL;
-    typedef PROC(WINAPI* pfnWGL)(LPCSTR);
-    static pfnWGL realWgl = nullptr;
-    if (!realWgl) realWgl = (pfnWGL)GetProcAddress(hRealOpenGL, "wglGetProcAddress");
-    return realWgl ? realWgl(name) : NULL;
-}
-
 static void* GetRealProc(const char* name) {
-    if (!hRealOpenGL || !name) return nullptr;
-    void* p = (void*)GetProcAddress(hRealOpenGL, name);
-    if (p) return p;
-    return (void*)RealWglGetProcAddress(name);
+    if (!hRealOpenGL) return nullptr;
+    void* p = GetProcAddress(hRealOpenGL, name);
+    if (!p) {
+        typedef PROC(WINAPI* pfnWGL)(LPCSTR);
+        static pfnWGL wglGet = (pfnWGL)GetProcAddress(hRealOpenGL, "wglGetProcAddress");
+        if (wglGet) p = wglGet(name);
+    }
+    return p;
 }
 
-static void EnsureRealFuncs() {
-    if (!hRealOpenGL) return;
-    if (!real_glShaderSource)         real_glShaderSource         = (PFN_glShaderSource)         GetRealProc("glShaderSource");
-    if (!real_glShaderSourceARB)      real_glShaderSourceARB      = (PFN_glShaderSourceARB)      GetRealProc("glShaderSourceARB");
-    if (!real_glCompileShader)        real_glCompileShader        = (PFN_glCompileShader)         GetRealProc("glCompileShader");
-    if (!real_glLinkProgram)          real_glLinkProgram          = (PFN_glLinkProgram)           GetRealProc("glLinkProgram");
-    if (!real_glGetShaderiv)          real_glGetShaderiv          = (PFN_glGetShaderiv)           GetRealProc("glGetShaderiv");
-    if (!real_glGetShaderInfoLog)     real_glGetShaderInfoLog     = (PFN_glGetShaderInfoLog)      GetRealProc("glGetShaderInfoLog");
-    if (!real_glGetProgramiv)         real_glGetProgramiv         = (PFN_glGetProgramiv)          GetRealProc("glGetProgramiv");
-    if (!real_glGetProgramInfoLog)    real_glGetProgramInfoLog    = (PFN_glGetProgramInfoLog)     GetRealProc("glGetProgramInfoLog");
-    if (!real_glBindFragDataLocation) real_glBindFragDataLocation = (PFN_glBindFragDataLocation)  GetRealProc("glBindFragDataLocation");
-    if (!real_glBindAttribLocation)   real_glBindAttribLocation   = (PFN_glBindAttribLocation)    GetRealProc("glBindAttribLocation");
-    if (!real_glViewport)             real_glViewport             = (PFN_glViewport)              GetRealProc("glViewport");
-    if (!real_glGetString)            real_glGetString            = (PFN_glGetString)             GetRealProc("glGetString");
+static inline PFN_glShaderSource Get_glShaderSource() {
+    if (!real_glShaderSource) real_glShaderSource = (PFN_glShaderSource)GetRealProc("glShaderSource");
+    return real_glShaderSource;
+}
+static inline PFN_glShaderSourceARB Get_glShaderSourceARB() {
+    if (!real_glShaderSourceARB) real_glShaderSourceARB = (PFN_glShaderSourceARB)GetRealProc("glShaderSourceARB");
+    return real_glShaderSourceARB;
+}
+static inline PFN_glCompileShader Get_glCompileShader() {
+    if (!real_glCompileShader) real_glCompileShader = (PFN_glCompileShader)GetRealProc("glCompileShader");
+    return real_glCompileShader;
+}
+static inline PFN_glLinkProgram Get_glLinkProgram() {
+    if (!real_glLinkProgram) real_glLinkProgram = (PFN_glLinkProgram)GetRealProc("glLinkProgram");
+    return real_glLinkProgram;
+}
+static inline PFN_glGetShaderiv Get_glGetShaderiv() {
+    if (!real_glGetShaderiv) real_glGetShaderiv = (PFN_glGetShaderiv)GetRealProc("glGetShaderiv");
+    return real_glGetShaderiv;
+}
+static inline PFN_glGetShaderInfoLog Get_glGetShaderInfoLog() {
+    if (!real_glGetShaderInfoLog) real_glGetShaderInfoLog = (PFN_glGetShaderInfoLog)GetRealProc("glGetShaderInfoLog");
+    return real_glGetShaderInfoLog;
+}
+static inline PFN_glGetProgramiv Get_glGetProgramiv() {
+    if (!real_glGetProgramiv) real_glGetProgramiv = (PFN_glGetProgramiv)GetRealProc("glGetProgramiv");
+    return real_glGetProgramiv;
+}
+static inline PFN_glGetProgramInfoLog Get_glGetProgramInfoLog() {
+    if (!real_glGetProgramInfoLog) real_glGetProgramInfoLog = (PFN_glGetProgramInfoLog)GetRealProc("glGetProgramInfoLog");
+    return real_glGetProgramInfoLog;
+}
+static inline PFN_glBindFragDataLocation Get_glBindFragDataLocation() {
+    if (!real_glBindFragDataLocation) real_glBindFragDataLocation = (PFN_glBindFragDataLocation)GetRealProc("glBindFragDataLocation");
+    return real_glBindFragDataLocation;
+}
+static inline PFN_glBindAttribLocation Get_glBindAttribLocation() {
+    if (!real_glBindAttribLocation) real_glBindAttribLocation = (PFN_glBindAttribLocation)GetRealProc("glBindAttribLocation");
+    return real_glBindAttribLocation;
+}
+static inline PFN_glViewport Get_glViewport() {
+    if (!real_glViewport) real_glViewport = (PFN_glViewport)GetRealProc("glViewport");
+    return real_glViewport;
+}
+static inline PFN_glGetString Get_glGetString() {
+    if (!real_glGetString) real_glGetString = (PFN_glGetString)GetRealProc("glGetString");
+    return real_glGetString;
 }
 
 // -------------------- Shader log helpers -----------------------------------
 static void DumpShaderLog(GLuint shader) {
-    EnsureRealFuncs();
-    if (!real_glGetShaderiv || !real_glGetShaderInfoLog) return;
+    auto pGetShaderiv = Get_glGetShaderiv();
+    auto pGetShaderInfoLog = Get_glGetShaderInfoLog();
+    if (!pGetShaderiv || !pGetShaderInfoLog) return;
     GLint status = 0;
-    real_glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    pGetShaderiv(shader, GL_COMPILE_STATUS, &status);
     if (status == 0) {
         GLint len = 0;
-        real_glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &len);
+        pGetShaderiv(shader, GL_INFO_LOG_LENGTH, &len);
         if (len > 0) {
             std::vector<char> buf(len + 1);
-            real_glGetShaderInfoLog(shader, len, nullptr, buf.data());
+            pGetShaderInfoLog(shader, len, nullptr, buf.data());
             ProxyLog::Log(std::string("Shader compile failed: ") + buf.data());
         } else { ProxyLog::Log("Shader compile failed: (no log)"); }
     }
 }
 
 static void DumpProgramLog(GLuint program) {
-    EnsureRealFuncs();
-    if (!real_glGetProgramiv || !real_glGetProgramInfoLog) return;
+    auto pGetProgramiv = Get_glGetProgramiv();
+    auto pGetProgramInfoLog = Get_glGetProgramInfoLog();
+    if (!pGetProgramiv || !pGetProgramInfoLog) return;
     GLint status = 0;
-    real_glGetProgramiv(program, GL_LINK_STATUS, &status);
+    pGetProgramiv(program, GL_LINK_STATUS, &status);
     if (status == 0) {
         GLint len = 0;
-        real_glGetProgramiv(program, GL_INFO_LOG_LENGTH, &len);
+        pGetProgramiv(program, GL_INFO_LOG_LENGTH, &len);
         if (len > 0) {
             std::vector<char> buf(len + 1);
-            real_glGetProgramInfoLog(program, len, nullptr, buf.data());
+            pGetProgramInfoLog(program, len, nullptr, buf.data());
             ProxyLog::Log(std::string("Program link failed: ") + buf.data());
         } else { ProxyLog::Log("Program link failed: (no log)"); }
     }
@@ -456,9 +480,9 @@ static void DumpProgramLog(GLuint program) {
 static void Internal_glShaderSource_impl(GLuint shader, GLsizei count,
     const GLchar* const* string, const GLint* length)
 {
-    EnsureRealFuncs();
+    auto pReal = Get_glShaderSource();
     if (count <= 0 || !string) {
-        if (real_glShaderSource) real_glShaderSource(shader, count, string, length);
+        if (pReal) pReal(shader, count, string, length);
         return;
     }
     std::string combined;
@@ -472,9 +496,10 @@ static void Internal_glShaderSource_impl(GLuint shader, GLsizei count,
     { std::lock_guard<std::mutex> lk(g_originalMutex); g_originalSource[shader] = combined; }
 
     GLenum shaderType = 0;
-    if (real_glGetShaderiv) {
+    auto pGetShaderiv = Get_glGetShaderiv();
+    if (pGetShaderiv) {
         GLint st = 0;
-        real_glGetShaderiv(shader, GL_SHADER_TYPE, &st);
+        pGetShaderiv(shader, GL_SHADER_TYPE, &st);
         if (st == GL_VERTEX_SHADER || st == GL_FRAGMENT_SHADER || st == GL_COMPUTE_SHADER)
             shaderType = (GLenum)st;
     }
@@ -490,16 +515,15 @@ static void Internal_glShaderSource_impl(GLuint shader, GLsizei count,
         ProxyLog::Log("-------------------------------");
     }
     const char* p = transformed.c_str();
-    if (real_glShaderSource) real_glShaderSource(shader, 1, &p, nullptr);
-    else { auto f = (PFN_glShaderSource)GetRealProc("glShaderSource"); if (f) f(shader, 1, &p, nullptr); }
+    if (pReal) pReal(shader, 1, &p, nullptr);
 }
 
 static void Internal_glShaderSourceARB_impl(GLhandleARB shader, GLsizei count,
     const GLcharARB** string, const GLint* length)
 {
-    EnsureRealFuncs();
+    auto pReal = Get_glShaderSourceARB();
     if (count <= 0 || !string) {
-        if (real_glShaderSourceARB) real_glShaderSourceARB(shader, count, string, length);
+        if (pReal) pReal(shader, count, string, length);
         return;
     }
     std::string combined;
@@ -521,18 +545,17 @@ static void Internal_glShaderSourceARB_impl(GLhandleARB shader, GLsizei count,
         ProxyLog::Log("-------------------------------");
     }
     const char* p = transformed.c_str();
-    if (real_glShaderSourceARB) real_glShaderSourceARB(shader, 1, &p, nullptr);
-    else { auto f = (PFN_glShaderSourceARB)GetRealProc("glShaderSourceARB"); if (f) f(shader, 1, &p, nullptr); }
+    if (pReal) pReal(shader, 1, &p, nullptr);
 }
 
 static void Internal_glCompileShader_impl(GLuint shader) {
-    EnsureRealFuncs();
-    if (real_glCompileShader) real_glCompileShader(shader);
-    else { auto f = (PFN_glCompileShader)GetRealProc("glCompileShader"); if (f) f(shader); }
+    auto pCompile = Get_glCompileShader();
+    if (pCompile) pCompile(shader);
 
     bool ok = true;
-    if (real_glGetShaderiv) {
-        GLint status = 0; real_glGetShaderiv(shader, GL_COMPILE_STATUS, &status); ok = (status != 0);
+    auto pGetShaderiv = Get_glGetShaderiv();
+    if (pGetShaderiv) {
+        GLint status = 0; pGetShaderiv(shader, GL_COMPILE_STATUS, &status); ok = (status != 0);
     }
     if (!ok) {
         DumpShaderLog(shader);
@@ -540,13 +563,12 @@ static void Internal_glCompileShader_impl(GLuint shader) {
         { std::lock_guard<std::mutex> lk(g_originalMutex); auto it = g_originalSource.find(shader); if (it != g_originalSource.end()) orig = it->second; }
         if (!orig.empty()) {
             ProxyLog::Log("Transformed shader failed; retrying original source as fallback.");
+            auto pSource = Get_glShaderSource();
             const char* p = orig.c_str();
-            if (real_glShaderSource) real_glShaderSource(shader, 1, &p, nullptr);
-            else { auto f = (PFN_glShaderSource)GetRealProc("glShaderSource"); if (f) f(shader, 1, &p, nullptr); }
-            if (real_glCompileShader) real_glCompileShader(shader);
-            else { auto f = (PFN_glCompileShader)GetRealProc("glCompileShader"); if (f) f(shader); }
-            if (real_glGetShaderiv) {
-                GLint s2 = 0; real_glGetShaderiv(shader, GL_COMPILE_STATUS, &s2);
+            if (pSource) pSource(shader, 1, &p, nullptr);
+            if (pCompile) pCompile(shader);
+            if (pGetShaderiv) {
+                GLint s2 = 0; pGetShaderiv(shader, GL_COMPILE_STATUS, &s2);
                 if (s2 == 0) { ProxyLog::Log("Fallback original shader also failed."); DumpShaderLog(shader); }
                 else {
                     ProxyLog::Log("Fallback original shader compiled successfully.");
@@ -558,67 +580,58 @@ static void Internal_glCompileShader_impl(GLuint shader) {
 }
 
 static void Internal_glLinkProgram_impl(GLuint program) {
-    EnsureRealFuncs();
-
-    // Bind fragment data outputs (gl_FragColor / gl_FragData replacements).
-    // _fragColorN always maps to location N; binding a non-existent name is a no-op.
-    {
+    auto pBindFrag = Get_glBindFragDataLocation();
+    if (pBindFrag) {
+        // Bind fragment data outputs (gl_FragColor / gl_FragData replacements).
+        // _fragColorN always maps to location N; binding a non-existent name is a no-op.
         std::lock_guard<std::mutex> lk(g_injectedMutex);
-        if (real_glBindFragDataLocation) {
-            for (const auto& kv : g_injectedOutputs) {
-                for (const auto& pr : kv.second) {
-                    real_glBindFragDataLocation(program, (GLuint)pr.first, pr.second.c_str());
-                    std::ostringstream oss;
-                    oss << "Bound frag data: program=" << program
-                        << " name=" << pr.second << " loc=" << pr.first;
-                    ProxyLog::Log(oss.str());
-                }
+        for (const auto& kv : g_injectedOutputs) {
+            for (const auto& pr : kv.second) {
+                pBindFrag(program, (GLuint)pr.first, pr.second.c_str());
+                std::ostringstream oss;
+                oss << "Bound frag data: program=" << program
+                    << " name=" << pr.second << " loc=" << pr.first;
+                ProxyLog::Log(oss.str());
             }
         }
     }
-
-    // Bind vertex attribute replacement for gl_Vertex to slot 0.
-    // gl_Vertex is attribute slot 0 in the fixed-function pipeline.
-    // Binding a non-existent name is a no-op, so this is safe for all programs.
-    if (real_glBindAttribLocation) {
-        real_glBindAttribLocation(program, 0, "_aVertex");
+    auto pBindAttrib = Get_glBindAttribLocation();
+    if (pBindAttrib) {
+        // Bind vertex attribute replacement for gl_Vertex to slot 0.
+        // gl_Vertex is attribute slot 0 in the fixed-function pipeline.
+        // Binding a non-existent name is a no-op, so this is safe for all programs.
+        pBindAttrib(program, 0, "_aVertex");
         ProxyLog::Log("Bound attrib: program=" + ToStringInt(program) + " _aVertex -> slot 0");
     }
-
-    if (real_glLinkProgram) real_glLinkProgram(program);
-    else { auto f = (PFN_glLinkProgram)GetRealProc("glLinkProgram"); if (f) f(program); }
+    auto pLink = Get_glLinkProgram();
+    if (pLink) pLink(program);
     DumpProgramLog(program);
 }
 
-// -------------------- glViewport -------------------------------------------
+// -------------------- glViewport (atomic logging) -------------------------
 extern "C" void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
-    EnsureRealFuncs();
+    auto pReal = Get_glViewport();
+    if (pReal) pReal(x, y, width, height);
 #if PROXY_LOG_ENABLED
-    static std::mutex vpMutex;
-    static int lastW = -1, lastH = -1;
-    static uint64_t lastLogMs = 0;
+    static std::atomic<int> lastW{-1}, lastH{-1};
+    static std::atomic<uint64_t> lastLogMs{0};
     uint64_t nowMs = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    bool shouldLog = false;
-    {
-        std::lock_guard<std::mutex> lk(vpMutex);
-        if (width != lastW || height != lastH) { shouldLog = true; lastW = width; lastH = height; lastLogMs = nowMs; }
-        else if (nowMs - lastLogMs >= 1000) { shouldLog = true; lastLogMs = nowMs; }
-    }
-    if (shouldLog)
+    int w = width, h = height;
+    int lw = lastW.load(), lh = lastH.load();
+    uint64_t last = lastLogMs.load();
+    if (w != lw || h != lh || (nowMs - last) >= 1000) {
+        lastW.store(w); lastH.store(h); lastLogMs.store(nowMs);
         ProxyLog::Log(std::string("glViewport: x=") + ToStringInt(x) + " y=" + ToStringInt(y) +
-            " w=" + ToStringInt(width) + " h=" + ToStringInt(height));
+                      " w=" + ToStringInt(w) + " h=" + ToStringInt(h));
+    }
 #endif
-    if (real_glViewport) real_glViewport(x, y, width, height);
-    else { auto f = (PFN_glViewport)GetRealProc("glViewport"); if (f) f(x, y, width, height); }
 }
 
-// -------------------- glGetString ------------------------------------------
+// -------------------- glGetString (unchanged) -----------------------------
 extern "C" const unsigned char* APIENTRY glGetString(GLenum name) {
-    EnsureRealFuncs();
-    const unsigned char* ret = nullptr;
-    if (real_glGetString) ret = real_glGetString(name);
-    else { auto f = (PFN_glGetString)GetRealProc("glGetString"); if (f) ret = f(name); }
+    auto pReal = Get_glGetString();
+    const unsigned char* ret = pReal ? pReal(name) : nullptr;
     if (name == GL_SHADING_LANGUAGE_VERSION)
         ProxyLog::Log(std::string("glGetString(GL_SHADING_LANGUAGE_VERSION) => ") + (ret ? (const char*)ret : "NULL"));
     else if (name == GL_VERSION)
@@ -652,7 +665,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
             strcat_s(path, "\\opengl32.dll");
             hRealOpenGL = LoadLibraryA(path);
             if (hRealOpenGL) {
-                EnsureRealFuncs();
+                // Do not resolve GL functions here – they will be resolved lazily.
                 ProxyLog::Log("opengl proxy loaded (system opengl32.dll)");
             } else {
                 ProxyLog::Log("opengl proxy: failed to load system opengl32.dll");
@@ -688,7 +701,6 @@ extern "C" PROC WINAPI wglGetProcAddress(LPCSTR procName) {
     if (strcmp(procName, "glGetString")       == 0) return (PROC)glGetString;
 
     typedef PROC(WINAPI* pfnWGL)(LPCSTR);
-    pfnWGL real = nullptr;
-    if (hRealOpenGL) real = (pfnWGL)GetProcAddress(hRealOpenGL, "wglGetProcAddress");
+    static pfnWGL real = (pfnWGL)GetProcAddress(hRealOpenGL, "wglGetProcAddress");
     return real ? real(procName) : NULL;
 }
