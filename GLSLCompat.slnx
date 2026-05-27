@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="GLSLCompat/GLSLCompat.vcxproj" Id="139cbecc-cdf9-4cbf-8a07-754ee1a36bd2" />
+</Solution>

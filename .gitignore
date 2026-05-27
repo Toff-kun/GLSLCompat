@@ -1,0 +1,53 @@
+# Visual Studio cache and settings
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+
+# Compiler and linker intermediates
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.aps
+*.ncb
+*.opendb
+*.tlog
+*.cache
+*.ipch
+
+# Database and browsing files
+*.db
+*.db-shm
+*.db-wal
+
+# Backup and layout files
+*.bak
+*.backup.json
+*.json
+
+# Executables and libraries
+*.exe
+*.dll
+*.lib
+*.exp
+
+# Other temp files
+*.log
+*.tmp
+*.vspscc
+*.vssscc

@@ -1,0 +1,36 @@
+name: Build and Release GLSLCompat
+
+on:
+  push:
+    tags:
+      - 'v*'   # e.g. v1.0, v1.1
+  release:
+    types: [published]   # fires when you publish a release in GitHub's UI
+  workflow_dispatch:      # optional manual trigger
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # required to upload to releases
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution
+        run: msbuild GLSLCompat.slnx /p:Configuration=Release
+
+      - name: Package DLL
+        run: |
+          mkdir package
+          copy x64\Release\opengl32.dll package\
+          powershell Compress-Archive -Path package\* -DestinationPath GLSLCompat-${{ github.event.release.tag_name }}.zip
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: GLSLCompat-${{ github.event.release.tag_name }}.zip
