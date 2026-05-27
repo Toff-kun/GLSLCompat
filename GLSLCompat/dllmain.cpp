@@ -118,7 +118,8 @@ namespace ProxyLog {
                 std::ofstream f(logPath, std::ios::app);
                 if (f.is_open()) { for (const auto& m : local) f << m << "\n"; }
                 for (const auto& m : local) { OutputDebugStringA(m.c_str()); OutputDebugStringA("\n"); }
-            } else { lk.unlock(); }
+            }
+            else { lk.unlock(); }
         }
         std::vector<std::string> remaining;
         { std::lock_guard<std::mutex> lk(queueMutex); remaining.swap(queue); }
@@ -201,7 +202,8 @@ static std::string EnsureCompatibilityVersion(const char* src, size_t len) {
         oss << "#version " << ver;
         if (!rest.empty()) oss << " " << rest;
         versionLine = oss.str();
-    } else {
+    }
+    else {
         versionLine = "#version 330 compatibility";
     }
 
@@ -232,8 +234,10 @@ static std::mutex g_shaderTransformMutex;
 static std::unordered_map<GLuint, std::string> g_originalSource;
 static std::mutex g_originalMutex;
 
-// Fragment data outputs only. Vertex attribute bindings are handled separately
-// via the unconditional glBindAttribLocation call in Internal_glLinkProgram_impl.
+// Fragment data outputs are recorded here for GLSL >= 130 only.
+// Vertex attribute replacement for gl_Vertex is injected as 'attribute' for
+// legacy GLSL (<130) and 'in' for GLSL >= 130. glBindAttribLocation("_aVertex")
+// is still called unconditionally in Internal_glLinkProgram_impl to bind slot 0.
 static std::unordered_map<GLuint, std::vector<std::pair<int, std::string>>> g_injectedOutputs;
 static std::mutex g_injectedMutex;
 
@@ -257,7 +261,7 @@ static void WordReplace(std::string& s, const std::string& from, const std::stri
     auto isword = [](char c) { return isalnum((unsigned char)c) || c == '_'; };
     size_t pos = 0;
     while ((pos = s.find(from, pos)) != std::string::npos) {
-        bool pre  = (pos == 0) || !isword(s[pos - 1]);
+        bool pre = (pos == 0) || !isword(s[pos - 1]);
         bool post = (pos + from.size() >= s.size()) || !isword(s[pos + from.size()]);
         if (pre && post) { s.replace(pos, from.size(), to); pos += to.size(); }
         else pos++;
@@ -271,16 +275,18 @@ static void InsertAfterVersion(std::string& src, const std::string& decl) {
 }
 
 static GLenum DetectShaderStageByContent(const std::string& src) {
-    if (src.find("gl_FragColor")  != std::string::npos) return GL_FRAGMENT_SHADER;
-    if (src.find("gl_FragData")   != std::string::npos) return GL_FRAGMENT_SHADER;
-    if (src.find("gl_FragCoord")  != std::string::npos) return GL_FRAGMENT_SHADER;
-    if (src.find("gl_Frag")       != std::string::npos) return GL_FRAGMENT_SHADER;
-    if (src.find("gl_Position")   != std::string::npos) return GL_VERTEX_SHADER;
-    if (src.find("attribute ")    != std::string::npos) return GL_VERTEX_SHADER;
-    if (src.find("gl_Vertex")     != std::string::npos) return GL_VERTEX_SHADER;
+    if (src.find("gl_FragColor") != std::string::npos) return GL_FRAGMENT_SHADER;
+    if (src.find("gl_FragData") != std::string::npos) return GL_FRAGMENT_SHADER;
+    if (src.find("gl_FragCoord") != std::string::npos) return GL_FRAGMENT_SHADER;
+    if (src.find("gl_Frag") != std::string::npos) return GL_FRAGMENT_SHADER;
+    if (src.find("gl_Position") != std::string::npos) return GL_VERTEX_SHADER;
+    if (src.find("attribute ") != std::string::npos) return GL_VERTEX_SHADER;
+    if (src.find("gl_Vertex") != std::string::npos) return GL_VERTEX_SHADER;
     return 0;
 }
 
+// Version-aware conservative transform: injects modern qualifiers only for GLSL >= 130,
+// injects attribute for legacy vertex replacement, and records fragment outputs for binding.
 static std::string TransformShaderSourceConservative(GLenum shaderType, const std::string& original, GLuint shaderId) {
     size_t key = HashStringWithStage(original, shaderType);
     {
@@ -295,53 +301,83 @@ static std::string TransformShaderSourceConservative(GLenum shaderType, const st
         }
     }
 
+    // Start from a conservative version of the source. EnsureCompatibilityVersion
+    // already produces a sensible #version line; we inspect that declared version
+    // and adapt injections accordingly.
     std::string s = EnsureCompatibilityVersion(original.c_str(), original.size());
+    int glslVer = GetGLSLVersion(s);
+
     GLenum effectiveStage = shaderType;
     if (effectiveStage == 0) effectiveStage = DetectShaderStageByContent(s);
 
     std::vector<std::pair<int, std::string>> outputsLocal;
 
+    // Fragment shader handling
     if (effectiveStage == GL_FRAGMENT_SHADER) {
-        if (s.find("gl_FragColor") != std::string::npos) {
-            std::string name = "_fragColor0";
-            if (s.find("out vec4 " + name) == std::string::npos)
-                InsertAfterVersion(s, "// injected compatibility output\nout vec4 " + name + ";");
-            ReplaceAll(s, "gl_FragColor", name);
-            outputsLocal.emplace_back(0, name);
-        }
-        for (int i = 0; i < 8; ++i) {
-            std::ostringstream tok; tok << "gl_FragData[" << i << "]";
-            std::string token = tok.str();
-            if (s.find(token) != std::string::npos) {
-                std::string nm = "_fragColor" + std::to_string(i);
-                if (s.find("out vec4 " + nm) == std::string::npos)
-                    InsertAfterVersion(s, "// injected fragdata output\nout vec4 " + nm + ";");
-                ReplaceAll(s, token, nm);
-                outputsLocal.emplace_back(i, nm);
+        if (glslVer >= 130) {
+            // Modern GLSL: safe to inject 'out' declarations and replace gl_FragColor/gl_FragData
+            if (s.find("gl_FragColor") != std::string::npos) {
+                std::string name = "_fragColor0";
+                if (s.find("out vec4 " + name) == std::string::npos)
+                    InsertAfterVersion(s, "// injected compatibility output\nout vec4 " + name + ";");
+                ReplaceAll(s, "gl_FragColor", name);
+                outputsLocal.emplace_back(0, name);
             }
+            for (int i = 0; i < 8; ++i) {
+                std::ostringstream tok; tok << "gl_FragData[" << i << "]";
+                std::string token = tok.str();
+                if (s.find(token) != std::string::npos) {
+                    std::string nm = "_fragColor" + std::to_string(i);
+                    if (s.find("out vec4 " + nm) == std::string::npos)
+                        InsertAfterVersion(s, "// injected fragdata output\nout vec4 " + nm + ";");
+                    ReplaceAll(s, token, nm);
+                    outputsLocal.emplace_back(i, nm);
+                }
+            }
+            // Replace legacy varying qualifier with 'in' for fragment inputs
+            WordReplace(s, "varying", "in");
         }
-        WordReplace(s, "varying", "in");
+        else {
+            // GLSL < 130: leave fragment legacy keywords untouched to avoid invalid syntax.
+            // Note: we intentionally do not attempt to silence driver deprecation warnings here.
+        }
     }
+    // Vertex shader handling
     else if (effectiveStage == GL_VERTEX_SHADER) {
-        WordReplace(s, "varying", "out");
-        // FIX: use 'attribute' for GLSL < 130, 'in' for GLSL >= 130.
-        // 'in' is not valid syntax for vertex attributes in #version 120 shaders.
-        if (s.find("gl_Vertex") != std::string::npos) {
-            if (s.find("_aVertex") == std::string::npos) {
-                int glslVer = GetGLSLVersion(s);
-                std::string qualifier = (glslVer >= 130) ? "in" : "attribute";
-                InsertAfterVersion(s, "// injected replacement for gl_Vertex\n" + qualifier + " vec4 _aVertex;");
+        if (glslVer >= 130) {
+            // Modern GLSL: 'in' for attributes, 'out' for varyings
+            WordReplace(s, "varying", "out");
+            if (s.find("gl_Vertex") != std::string::npos) {
+                // _aVertex is injected as a vertex attribute replacement for legacy shaders.
+                // For GLSL < 130 we inject "attribute vec4 _aVertex;", for GLSL >= 130 we inject
+                // "in vec4 _aVertex;". This is a vertex attribute (not a fragment output), so
+                // we do not add an entry to g_injectedOutputs. Internal_glLinkProgram_impl
+                // still calls glBindAttribLocation(program, 0, "_aVertex") unconditionally.
+                if (s.find("_aVertex") == std::string::npos) {
+                    InsertAfterVersion(s, "// injected replacement for gl_Vertex\nin vec4 _aVertex;");
+                }
+                WordReplace(s, "gl_Vertex", "_aVertex");
             }
-            WordReplace(s, "gl_Vertex", "_aVertex");
-            // NOTE: no g_injectedOutputs entry here - _aVertex is a vertex attribute,
-            // not a fragment output. glBindAttribLocation is called unconditionally
-            // for all programs in Internal_glLinkProgram_impl instead.
+        }
+        else {
+            // Legacy GLSL: use 'attribute' for vertex attributes and keep 'varying'
+            if (s.find("gl_Vertex") != std::string::npos) {
+                // _aVertex is injected as a vertex attribute replacement for legacy shaders.
+                // For GLSL < 130 we inject "attribute vec4 _aVertex;", for GLSL >= 130 we inject
+                // "in vec4 _aVertex;". This is a vertex attribute (not a fragment output), so
+                // we do not add an entry to g_injectedOutputs. Internal_glLinkProgram_impl
+                // still calls glBindAttribLocation(program, 0, "_aVertex") unconditionally.
+                if (s.find("_aVertex") == std::string::npos) {
+                    InsertAfterVersion(s, "// injected replacement for gl_Vertex\nattribute vec4 _aVertex;");
+                }
+                WordReplace(s, "gl_Vertex", "_aVertex");
+            }
         }
     }
 
     TransformCacheEntry entry;
     entry.transformed = s;
-    entry.outputs     = outputsLocal;
+    entry.outputs = outputsLocal;
 
     if (!outputsLocal.empty() && shaderId != 0) {
         std::lock_guard<std::mutex> lk(g_injectedMutex);
@@ -368,18 +404,18 @@ typedef void (APIENTRY* PFN_glBindAttribLocation)(GLuint, GLuint, const char*);
 typedef void (APIENTRY* PFN_glViewport)(GLint, GLint, GLsizei, GLsizei);
 typedef const unsigned char* (APIENTRY* PFN_glGetString)(GLenum);
 
-static PFN_glShaderSource         real_glShaderSource         = nullptr;
-static PFN_glShaderSourceARB      real_glShaderSourceARB      = nullptr;
-static PFN_glCompileShader        real_glCompileShader        = nullptr;
-static PFN_glLinkProgram          real_glLinkProgram          = nullptr;
-static PFN_glGetShaderiv          real_glGetShaderiv          = nullptr;
-static PFN_glGetShaderInfoLog     real_glGetShaderInfoLog     = nullptr;
-static PFN_glGetProgramiv         real_glGetProgramiv         = nullptr;
-static PFN_glGetProgramInfoLog    real_glGetProgramInfoLog    = nullptr;
+static PFN_glShaderSource         real_glShaderSource = nullptr;
+static PFN_glShaderSourceARB      real_glShaderSourceARB = nullptr;
+static PFN_glCompileShader        real_glCompileShader = nullptr;
+static PFN_glLinkProgram          real_glLinkProgram = nullptr;
+static PFN_glGetShaderiv          real_glGetShaderiv = nullptr;
+static PFN_glGetShaderInfoLog     real_glGetShaderInfoLog = nullptr;
+static PFN_glGetProgramiv         real_glGetProgramiv = nullptr;
+static PFN_glGetProgramInfoLog    real_glGetProgramInfoLog = nullptr;
 static PFN_glBindFragDataLocation real_glBindFragDataLocation = nullptr;
-static PFN_glBindAttribLocation   real_glBindAttribLocation   = nullptr;
-static PFN_glViewport             real_glViewport             = nullptr;
-static PFN_glGetString            real_glGetString            = nullptr;
+static PFN_glBindAttribLocation   real_glBindAttribLocation = nullptr;
+static PFN_glViewport             real_glViewport = nullptr;
+static PFN_glGetString            real_glGetString = nullptr;
 
 static void* GetRealProc(const char* name) {
     if (!hRealOpenGL) return nullptr;
@@ -455,7 +491,8 @@ static void DumpShaderLog(GLuint shader) {
             std::vector<char> buf(len + 1);
             pGetShaderInfoLog(shader, len, nullptr, buf.data());
             ProxyLog::Log(std::string("Shader compile failed: ") + buf.data());
-        } else { ProxyLog::Log("Shader compile failed: (no log)"); }
+        }
+        else { ProxyLog::Log("Shader compile failed: (no log)"); }
     }
 }
 
@@ -472,7 +509,8 @@ static void DumpProgramLog(GLuint program) {
             std::vector<char> buf(len + 1);
             pGetProgramInfoLog(program, len, nullptr, buf.data());
             ProxyLog::Log(std::string("Program link failed: ") + buf.data());
-        } else { ProxyLog::Log("Program link failed: (no log)"); }
+        }
+        else { ProxyLog::Log("Program link failed: (no log)"); }
     }
 }
 
@@ -557,6 +595,21 @@ static void Internal_glCompileShader_impl(GLuint shader) {
     if (pGetShaderiv) {
         GLint status = 0; pGetShaderiv(shader, GL_COMPILE_STATUS, &status); ok = (status != 0);
     }
+
+    // Always dump the info log if present when debugging/logging is enabled.
+#if PROXY_LOG_ENABLED
+    auto pGetShaderInfoLog = Get_glGetShaderInfoLog();
+    if (pGetShaderInfoLog && pGetShaderiv) {
+        GLint len = 0;
+        pGetShaderiv(shader, GL_INFO_LOG_LENGTH, &len);
+        if (len > 1) {
+            std::vector<char> buf(len + 1);
+            pGetShaderInfoLog(shader, len, nullptr, buf.data());
+            ProxyLog::Log(std::string("Shader info log: ") + buf.data());
+        }
+    }
+#endif
+
     if (!ok) {
         DumpShaderLog(shader);
         std::string orig;
@@ -576,7 +629,11 @@ static void Internal_glCompileShader_impl(GLuint shader) {
                 }
             }
         }
-    } else { DumpShaderLog(shader); }
+    }
+    else {
+        // Already logged info log above when PROXY_LOG_ENABLED; keep DumpShaderLog for failures only.
+        DumpShaderLog(shader);
+    }
 }
 
 static void Internal_glLinkProgram_impl(GLuint program) {
@@ -613,8 +670,8 @@ extern "C" void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei hei
     auto pReal = Get_glViewport();
     if (pReal) pReal(x, y, width, height);
 #if PROXY_LOG_ENABLED
-    static std::atomic<int> lastW{-1}, lastH{-1};
-    static std::atomic<uint64_t> lastLogMs{0};
+    static std::atomic<int> lastW{ -1 }, lastH{ -1 };
+    static std::atomic<uint64_t> lastLogMs{ 0 };
     uint64_t nowMs = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     int w = width, h = height;
@@ -623,7 +680,7 @@ extern "C" void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei hei
     if (w != lw || h != lh || (nowMs - last) >= 1000) {
         lastW.store(w); lastH.store(h); lastLogMs.store(nowMs);
         ProxyLog::Log(std::string("glViewport: x=") + ToStringInt(x) + " y=" + ToStringInt(y) +
-                      " w=" + ToStringInt(w) + " h=" + ToStringInt(h));
+            " w=" + ToStringInt(w) + " h=" + ToStringInt(h));
     }
 #endif
 }
@@ -667,13 +724,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
             if (hRealOpenGL) {
                 // Do not resolve GL functions here – they will be resolved lazily.
                 ProxyLog::Log("opengl proxy loaded (system opengl32.dll)");
-            } else {
+            }
+            else {
                 ProxyLog::Log("opengl proxy: failed to load system opengl32.dll");
             }
-        } else {
+        }
+        else {
             ProxyLog::Log("opengl proxy: GetSystemDirectoryA failed");
         }
-    } else if (reason == DLL_PROCESS_DETACH) {
+    }
+    else if (reason == DLL_PROCESS_DETACH) {
         ProxyLog::Log("opengl proxy unloading");
         ProxyLog::Stop();
         if (hRealOpenGL) { FreeLibrary(hRealOpenGL); hRealOpenGL = NULL; }
@@ -693,14 +753,15 @@ extern "C" PROC WINAPI wglGetProcAddress(LPCSTR procName) {
         lastLogTime.store(nowMs);
     }
 #endif
-    if (strcmp(procName, "glShaderSource")    == 0) return (PROC)glShaderSource;
+    if (strcmp(procName, "glShaderSource") == 0) return (PROC)glShaderSource;
     if (strcmp(procName, "glShaderSourceARB") == 0) return (PROC)glShaderSourceARB;
-    if (strcmp(procName, "glCompileShader")   == 0) return (PROC)glCompileShader;
-    if (strcmp(procName, "glLinkProgram")     == 0) return (PROC)glLinkProgram;
-    if (strcmp(procName, "glViewport")        == 0) return (PROC)glViewport;
-    if (strcmp(procName, "glGetString")       == 0) return (PROC)glGetString;
+    if (strcmp(procName, "glCompileShader") == 0) return (PROC)glCompileShader;
+    if (strcmp(procName, "glLinkProgram") == 0) return (PROC)glLinkProgram;
+    if (strcmp(procName, "glViewport") == 0) return (PROC)glViewport;
+    if (strcmp(procName, "glGetString") == 0) return (PROC)glGetString;
 
     typedef PROC(WINAPI* pfnWGL)(LPCSTR);
-    static pfnWGL real = (pfnWGL)GetProcAddress(hRealOpenGL, "wglGetProcAddress");
+    static pfnWGL real = nullptr;
+    if (hRealOpenGL) real = (pfnWGL)GetProcAddress(hRealOpenGL, "wglGetProcAddress");
     return real ? real(procName) : NULL;
 }
